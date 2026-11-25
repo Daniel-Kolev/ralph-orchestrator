@@ -1916,7 +1916,8 @@ pub async fn run_loop_impl(
                 .await
                 .map(|outcome| (outcome, None))
             } else {
-                let executor = CliExecutor::new(effective_backend.clone());
+                let executor = CliExecutor::new(effective_backend.clone())
+                    .with_workspace_root(config.core.workspace_root.clone());
                 let result = executor
                     .execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose)
                     .await?;

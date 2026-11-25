@@ -16,6 +16,7 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::env;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -62,6 +63,12 @@ pub struct ExecutionResult {
 #[derive(Debug)]
 pub struct CliExecutor {
     backend: CliBackend,
+    /// Workspace root for spawned backend processes: the process cwd for spawned
+    /// commands and the `RALPH_WORKSPACE_ROOT`/`RALPH_EVENTS_FILE` runtime env.
+    /// Falls back to the executor process's `current_dir()` when unset — which is
+    /// wrong for worktree loops, whose driver process runs from the primary
+    /// checkout while the loop's workspace is its worktree.
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 enum StreamEvent {
@@ -79,7 +86,19 @@ enum StreamKind {
 impl CliExecutor {
     /// Creates a new executor with the given backend.
     pub fn new(backend: CliBackend) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            workspace_root: None,
+        }
+    }
+
+    /// Spawns backend processes in (and with runtime env of) this workspace root.
+    /// Worktree loops must set this to their worktree: their driver runs from the
+    /// primary checkout, and both the session cwd and `ralph emit` routing derive
+    /// from the injected `RALPH_WORKSPACE_ROOT`/`RALPH_EVENTS_FILE`.
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = Some(root.into());
+        self
     }
 
     /// Executes a prompt and streams output to the provided writer.
@@ -109,9 +128,14 @@ impl CliExecutor {
         #[cfg(unix)]
         command.process_group(0);
 
-        // Set working directory to current directory (mirrors PTY executor behavior)
-        // Use fallback to "." if current_dir fails (e.g., E2E test workspaces)
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // Set working directory to the configured workspace root when present
+        // (mirrors PTY executor behavior); otherwise fall back to the current
+        // directory (also used when current_dir itself fails, e.g., E2E test
+        // workspaces with deleted cwds).
+        let cwd = self
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         command.current_dir(&cwd);
         inject_ralph_runtime_env(&mut command, &cwd);
 
