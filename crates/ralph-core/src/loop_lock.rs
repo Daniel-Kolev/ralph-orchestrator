@@ -157,8 +157,33 @@ impl LoopLock {
                     use nix::errno::Errno;
                     // EWOULDBLOCK and EAGAIN are the same on some platforms (macOS)
                     if errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN {
-                        // Lock is held by another process - read their metadata
-                        let metadata = Self::read_metadata(&file)?;
+                        // Lock is held by another process - read their metadata.
+                        // The holder writes its metadata right after flock, so a
+                        // concurrent opener can observe the file in its empty
+                        // create-to-write window; retry briefly before giving up.
+                        let mut metadata = None;
+                        for attempt in 0..10 {
+                            match Self::read_metadata(&file) {
+                                Ok(m) => {
+                                    metadata = Some(m);
+                                    break;
+                                }
+                                Err(LockError::ParseError(_)) if attempt < 9 => {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                        let metadata = metadata.unwrap_or_else(|| {
+                            tracing::warn!(
+                                "Lock file still empty after retries; reporting unknown holder"
+                            );
+                            LockMetadata {
+                                pid: 0,
+                                started: chrono::Utc::now(),
+                                prompt: String::new(),
+                            }
+                        });
                         Err(LockError::AlreadyLocked(metadata))
                     } else {
                         Err(LockError::Io(io::Error::new(
